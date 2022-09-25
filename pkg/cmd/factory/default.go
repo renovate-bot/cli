@@ -1,32 +1,38 @@
 package factory
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/context"
-	"github.com/cli/cli/git"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/context"
+	"github.com/cli/cli/v2/git"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/extension"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
 )
+
+var ssoHeader string
+var ssoURLRE = regexp.MustCompile(`\burl=([^;]+)`)
 
 func New(appVersion string) *cmdutil.Factory {
 	f := &cmdutil.Factory{
-		Config:     configFunc(), // No factory dependencies
-		Branch:     branchFunc(), // No factory dependencies
-		Executable: executable(), // No factory dependencies
+		Config:         configFunc(), // No factory dependencies
+		Branch:         branchFunc(), // No factory dependencies
+		ExecutableName: "gh",
 	}
 
 	f.IOStreams = ioStreams(f)                   // Depends on Config
 	f.HttpClient = httpClientFunc(f, appVersion) // Depends on Config, IOStreams, and appVersion
 	f.Remotes = remotesFunc(f)                   // Depends on Config
 	f.BaseRepo = BaseRepoFunc(f)                 // Depends on Remotes
-	f.Browser = browser(f)                       // Depends on IOStreams
+	f.Browser = browser(f)                       // Depends on Config, and IOStreams
+	f.ExtensionManager = extensionManager(f)     // Depends on Config, HttpClient, and IOStreams
 
 	return f
 }
@@ -82,21 +88,42 @@ func httpClientFunc(f *cmdutil.Factory, appVersion string) func() (*http.Client,
 		if err != nil {
 			return nil, err
 		}
-		return NewHTTPClient(io, cfg, appVersion, true), nil
+		opts := api.HTTPClientOptions{
+			Config:     cfg,
+			Log:        io.ErrOut,
+			AppVersion: appVersion,
+		}
+		client, err := api.NewHTTPClient(opts)
+		if err != nil {
+			return nil, err
+		}
+		client.Transport = api.ExtractHeader("X-GitHub-SSO", &ssoHeader)(client.Transport)
+		return client, nil
 	}
 }
 
 func browser(f *cmdutil.Factory) cmdutil.Browser {
 	io := f.IOStreams
-	return cmdutil.NewBrowser(os.Getenv("BROWSER"), io.Out, io.ErrOut)
+	return cmdutil.NewBrowser(browserLauncher(f), io.Out, io.ErrOut)
 }
 
-func executable() string {
-	gh := "gh"
-	if exe, err := os.Executable(); err == nil {
-		gh = exe
+// Browser precedence
+// 1. GH_BROWSER
+// 2. browser from config
+// 3. BROWSER
+func browserLauncher(f *cmdutil.Factory) string {
+	if ghBrowser := os.Getenv("GH_BROWSER"); ghBrowser != "" {
+		return ghBrowser
 	}
-	return gh
+
+	cfg, err := f.Config()
+	if err == nil {
+		if cfgBrowser, _ := cfg.Get("", "browser"); cfgBrowser != "" {
+			return cfgBrowser
+		}
+	}
+
+	return os.Getenv("BROWSER")
 }
 
 func configFunc() func() (config.Config, error) {
@@ -106,12 +133,7 @@ func configFunc() func() (config.Config, error) {
 		if cachedConfig != nil || configError != nil {
 			return cachedConfig, configError
 		}
-		cachedConfig, configError = config.ParseDefaultConfig()
-		if errors.Is(configError, os.ErrNotExist) {
-			cachedConfig = config.NewBlankConfig()
-			configError = nil
-		}
-		cachedConfig = config.InheritEnv(cachedConfig)
+		cachedConfig, configError = config.NewConfig()
 		return cachedConfig, configError
 	}
 }
@@ -126,6 +148,25 @@ func branchFunc() func() (string, error) {
 	}
 }
 
+func extensionManager(f *cmdutil.Factory) *extension.Manager {
+	em := extension.NewManager(f.IOStreams)
+
+	cfg, err := f.Config()
+	if err != nil {
+		return em
+	}
+	em.SetConfig(cfg)
+
+	client, err := f.HttpClient()
+	if err != nil {
+		return em
+	}
+
+	em.SetClient(api.NewCachedHTTPClient(client, time.Second*30))
+
+	return em
+}
+
 func ioStreams(f *cmdutil.Factory) *iostreams.IOStreams {
 	io := iostreams.System()
 	cfg, err := f.Config()
@@ -133,7 +174,7 @@ func ioStreams(f *cmdutil.Factory) *iostreams.IOStreams {
 		return io
 	}
 
-	if prompt, _ := cfg.Get("", "prompt"); prompt == "disabled" {
+	if prompt, _ := cfg.GetOrDefault("", "prompt"); prompt == "disabled" {
 		io.SetNeverPrompt(true)
 	}
 
@@ -148,4 +189,17 @@ func ioStreams(f *cmdutil.Factory) *iostreams.IOStreams {
 	}
 
 	return io
+}
+
+// SSOURL returns the URL of a SAML SSO challenge received by the server for clients that use ExtractHeader
+// to extract the value of the "X-GitHub-SSO" response header.
+func SSOURL() string {
+	if ssoHeader == "" {
+		return ""
+	}
+	m := ssoURLRE.FindStringSubmatch(ssoHeader)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }

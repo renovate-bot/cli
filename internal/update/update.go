@@ -2,7 +2,6 @@ package update
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghinstance"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/hashicorp/go-version"
 	"gopkg.in/yaml.v3"
 )
@@ -65,7 +64,7 @@ func getLatestReleaseInfo(client *api.Client, repo string) (*ReleaseInfo, error)
 }
 
 func getStateEntry(stateFilePath string) (*StateEntry, error) {
-	content, err := ioutil.ReadFile(stateFilePath)
+	content, err := os.ReadFile(stateFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +90,7 @@ func setStateEntry(stateFilePath string, t time.Time, r ReleaseInfo) error {
 		return err
 	}
 
-	err = ioutil.WriteFile(stateFilePath, content, 0600)
+	err = os.WriteFile(stateFilePath, content, 0600)
 	return err
 }
 

@@ -2,15 +2,17 @@ package shared
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/git"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/prompt"
+	"github.com/cli/cli/v2/git"
+	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/prompt"
 	"github.com/google/shlex"
 )
 
@@ -23,7 +25,8 @@ type GitCredentialFlow struct {
 }
 
 func (flow *GitCredentialFlow) Prompt(hostname string) error {
-	flow.helper, _ = gitCredentialHelper(hostname)
+	var gitErr error
+	flow.helper, gitErr = gitCredentialHelper(hostname)
 	if isOurCredentialHelper(flow.helper) {
 		flow.scopes = append(flow.scopes, "workflow")
 		return nil
@@ -37,6 +40,9 @@ func (flow *GitCredentialFlow) Prompt(hostname string) error {
 		return fmt.Errorf("could not prompt: %w", err)
 	}
 	if flow.shouldSetup {
+		if isGitMissing(gitErr) {
+			return gitErr
+		}
 		flow.scopes = append(flow.scopes, "workflow")
 	}
 
@@ -57,25 +63,46 @@ func (flow *GitCredentialFlow) Setup(hostname, username, authToken string) error
 
 func (flow *GitCredentialFlow) gitCredentialSetup(hostname, username, password string) error {
 	if flow.helper == "" {
-		// first use a blank value to indicate to git we want to sever the chain of credential helpers
-		preConfigureCmd, err := git.GitCommand("config", "--global", gitCredentialHelperKey(hostname), "")
-		if err != nil {
-			return err
-		}
-		if err = run.PrepareCmd(preConfigureCmd).Run(); err != nil {
-			return err
+		credHelperKeys := []string{
+			gitCredentialHelperKey(hostname),
 		}
 
-		// use GitHub CLI as a credential helper (for this host only)
-		configureCmd, err := git.GitCommand(
-			"config", "--global", "--add",
-			gitCredentialHelperKey(hostname),
-			fmt.Sprintf("!%s auth git-credential", shellQuote(flow.Executable)),
-		)
-		if err != nil {
-			return err
+		gistHost := strings.TrimSuffix(ghinstance.GistHost(hostname), "/")
+		if strings.HasPrefix(gistHost, "gist.") {
+			credHelperKeys = append(credHelperKeys, gitCredentialHelperKey(gistHost))
 		}
-		return run.PrepareCmd(configureCmd).Run()
+
+		var configErr error
+
+		for _, credHelperKey := range credHelperKeys {
+			if configErr != nil {
+				break
+			}
+			// first use a blank value to indicate to git we want to sever the chain of credential helpers
+			preConfigureCmd, err := git.GitCommand("config", "--global", "--replace-all", credHelperKey, "")
+			if err != nil {
+				configErr = err
+				break
+			}
+			if err = run.PrepareCmd(preConfigureCmd).Run(); err != nil {
+				configErr = err
+				break
+			}
+
+			// second configure the actual helper for this host
+			configureCmd, err := git.GitCommand(
+				"config", "--global", "--add",
+				credHelperKey,
+				fmt.Sprintf("!%s auth git-credential", shellQuote(flow.Executable)),
+			)
+			if err != nil {
+				configErr = err
+			} else {
+				configErr = run.PrepareCmd(configureCmd).Run()
+			}
+		}
+
+		return configErr
 	}
 
 	// clear previous cached credentials
@@ -115,7 +142,8 @@ func (flow *GitCredentialFlow) gitCredentialSetup(hostname, username, password s
 }
 
 func gitCredentialHelperKey(hostname string) string {
-	return fmt.Sprintf("credential.https://%s.helper", hostname)
+	host := strings.TrimSuffix(ghinstance.HostPrefix(hostname), "/")
+	return fmt.Sprintf("credential.%s.helper", host)
 }
 
 func gitCredentialHelper(hostname string) (helper string, err error) {
@@ -138,6 +166,14 @@ func isOurCredentialHelper(cmd string) bool {
 	}
 
 	return strings.TrimSuffix(filepath.Base(args[0]), ".exe") == "gh"
+}
+
+func isGitMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errNotInstalled *git.NotInstalled
+	return errors.As(err, &errNotInstalled)
 }
 
 func shellQuote(s string) string {

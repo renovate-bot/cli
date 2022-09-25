@@ -1,23 +1,23 @@
 package fork
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/context"
-	"github.com/cli/cli/git"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/prompt"
-	"github.com/cli/cli/utils"
+	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/context"
+	"github.com/cli/cli/v2/git"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/prompt"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -40,6 +40,7 @@ type ForkOptions struct {
 	PromptRemote bool
 	RemoteName   string
 	Organization string
+	ForkName     string
 	Rename       bool
 }
 
@@ -61,21 +62,23 @@ func NewCmdFork(f *cmdutil.Factory, runF func(*ForkOptions) error) *cobra.Comman
 		Use: "fork [<repository>] [-- <gitflags>...]",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() == 0 && len(args[1:]) > 0 {
-				return cmdutil.FlagError{Err: fmt.Errorf("repository argument required when passing 'git clone' flags")}
+				return cmdutil.FlagErrorf("repository argument required when passing git clone flags")
 			}
 			return nil
 		},
 		Short: "Create a fork of a repository",
-		Long: `Create a fork of a repository.
+		Long: heredoc.Docf(`
+			Create a fork of a repository.
 
-With no argument, creates a fork of the current repository. Otherwise, forks
-the specified repository.
+			With no argument, creates a fork of the current repository. Otherwise, forks
+			the specified repository.
 
-By default, the new fork is set to be your 'origin' remote and any existing
-origin remote is renamed to 'upstream'. To alter this behavior, you can set
-a name for the new fork's remote with --remote-name.
+			By default, the new fork is set to be your "origin" remote and any existing
+			origin remote is renamed to "upstream". To alter this behavior, you can set
+			a name for the new fork's remote with %[1]s--remote-name%[1]s.
 
-Additional 'git clone' flags can be passed in by listing them after '--'.`,
+			Additional git clone flags can be passed after %[1]s--%[1]s.
+		`, "`"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			promptOk := opts.IO.CanPrompt()
 			if len(args) > 0 {
@@ -83,20 +86,20 @@ Additional 'git clone' flags can be passed in by listing them after '--'.`,
 				opts.GitArgs = args[1:]
 			}
 
+			if cmd.Flags().Changed("org") && opts.Organization == "" {
+				return cmdutil.FlagErrorf("--org cannot be blank")
+			}
+
 			if opts.RemoteName == "" {
-				return &cmdutil.FlagError{Err: errors.New("--remote-name cannot be blank")}
+				return cmdutil.FlagErrorf("--remote-name cannot be blank")
+			} else if !cmd.Flags().Changed("remote-name") {
+				opts.Rename = true // Any existing 'origin' will be renamed to upstream
 			}
 
-			if promptOk && !cmd.Flags().Changed("clone") {
-				opts.PromptClone = true
-			}
-
-			if promptOk && !cmd.Flags().Changed("remote") {
-				opts.PromptRemote = true
-			}
-
-			if !cmd.Flags().Changed("remote-name") {
-				opts.Rename = true
+			if promptOk {
+				// We can prompt for these if they were not specified.
+				opts.PromptClone = !cmd.Flags().Changed("clone")
+				opts.PromptRemote = !cmd.Flags().Changed("remote")
 			}
 
 			if runF != nil {
@@ -109,13 +112,14 @@ Additional 'git clone' flags can be passed in by listing them after '--'.`,
 		if err == pflag.ErrHelp {
 			return err
 		}
-		return &cmdutil.FlagError{Err: fmt.Errorf("%w\nSeparate git clone flags with '--'.", err)}
+		return cmdutil.FlagErrorf("%w\nSeparate git clone flags with `--`.", err)
 	})
 
-	cmd.Flags().BoolVar(&opts.Clone, "clone", false, "Clone the fork {true|false}")
-	cmd.Flags().BoolVar(&opts.Remote, "remote", false, "Add remote for fork {true|false}")
-	cmd.Flags().StringVar(&opts.RemoteName, "remote-name", defaultRemoteName, "Specify a name for a fork's new remote.")
+	cmd.Flags().BoolVar(&opts.Clone, "clone", false, "Clone the fork")
+	cmd.Flags().BoolVar(&opts.Remote, "remote", false, "Add a git remote for the fork")
+	cmd.Flags().StringVar(&opts.RemoteName, "remote-name", defaultRemoteName, "Specify the name for the new remote")
 	cmd.Flags().StringVar(&opts.Organization, "org", "", "Create the fork in an organization")
+	cmd.Flags().StringVar(&opts.ForkName, "fork-name", "", "Rename the forked repository")
 
 	return cmd
 }
@@ -202,6 +206,17 @@ func forkRun(opts *ForkOptions) error {
 		}
 	}
 
+	// Rename the forked repo if ForkName is specified in opts.
+	if opts.ForkName != "" {
+		forkedRepo, err = api.RenameRepo(apiClient, forkedRepo, opts.ForkName)
+		if err != nil {
+			return fmt.Errorf("could not rename fork: %w", err)
+		}
+		if connectedToTerminal {
+			fmt.Fprintf(stderr, "%s Renamed fork to %s\n", cs.SuccessIconWithColor(cs.Green), cs.Bold(ghrepo.FullName(forkedRepo)))
+		}
+	}
+
 	if (inParent && (!opts.Remote && !opts.PromptRemote)) || (!inParent && (!opts.Clone && !opts.PromptClone)) {
 		return nil
 	}
@@ -210,10 +225,7 @@ func forkRun(opts *ForkOptions) error {
 	if err != nil {
 		return err
 	}
-	protocol, err := cfg.Get(repoToFork.RepoHost(), "git_protocol")
-	if err != nil {
-		return err
-	}
+	protocol, _ := cfg.Get(repoToFork.RepoHost(), "git_protocol")
 
 	if inParent {
 		remotes, err := opts.Remotes()
@@ -221,17 +233,20 @@ func forkRun(opts *ForkOptions) error {
 			return err
 		}
 
-		if remote, err := remotes.FindByRepo(repoToFork.RepoOwner(), repoToFork.RepoName()); err == nil {
-
-			scheme := ""
-			if remote.FetchURL != nil {
-				scheme = remote.FetchURL.Scheme
-			}
-			if remote.PushURL != nil {
-				scheme = remote.PushURL.Scheme
-			}
-			if scheme != "" {
-				protocol = scheme
+		if protocol == "" { // user has no set preference
+			if remote, err := remotes.FindByRepo(repoToFork.RepoOwner(), repoToFork.RepoName()); err == nil {
+				scheme := ""
+				if remote.FetchURL != nil {
+					scheme = remote.FetchURL.Scheme
+				}
+				if remote.PushURL != nil {
+					scheme = remote.PushURL.Scheme
+				}
+				if scheme != "" {
+					protocol = scheme
+				} else {
+					protocol = "https"
+				}
 			}
 		}
 
@@ -299,7 +314,7 @@ func forkRun(opts *ForkOptions) error {
 			}
 
 			upstreamURL := ghrepo.FormatRemoteURL(repoToFork, protocol)
-			err = git.AddUpstreamRemote(upstreamURL, cloneDir, []string{})
+			err = git.AddNamedRemote(upstreamURL, "upstream", cloneDir, []string{})
 			if err != nil {
 				return err
 			}

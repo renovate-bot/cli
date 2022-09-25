@@ -1,10 +1,9 @@
 package api
 
 import (
-	"context"
 	"time"
 
-	"github.com/cli/cli/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/shurcooL/githubv4"
 )
 
@@ -65,8 +64,7 @@ func AddReview(client *Client, repo ghrepo.Interface, pr *PullRequest, input *Pu
 		},
 	}
 
-	gql := graphQLClient(client.http, repo.RepoHost())
-	return gql.MutateNamed(context.Background(), "PullRequestReviewAdd", &mutation, variables)
+	return client.Mutate(repo.RepoHost(), "PullRequestReviewAdd", &mutation, variables)
 }
 
 func (prr PullRequestReview) AuthorLogin() string {

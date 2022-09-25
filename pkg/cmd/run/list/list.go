@@ -5,13 +5,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/run/shared"
-	workflowShared "github.com/cli/cli/pkg/cmd/workflow/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/run/shared"
+	workflowShared "github.com/cli/cli/v2/pkg/cmd/workflow/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -25,9 +25,12 @@ type ListOptions struct {
 	BaseRepo   func() (ghrepo.Interface, error)
 
 	PlainOutput bool
+	Exporter    cmdutil.Exporter
 
 	Limit            int
 	WorkflowSelector string
+	Branch           string
+	Actor            string
 }
 
 func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Command {
@@ -37,9 +40,10 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	}
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List recent workflow runs",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Short:   "List recent workflow runs",
+		Aliases: []string{"ls"},
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
 			opts.BaseRepo = f.BaseRepo
@@ -48,7 +52,7 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 			opts.PlainOutput = !terminal
 
 			if opts.Limit < 1 {
-				return &cmdutil.FlagError{Err: fmt.Errorf("invalid limit: %v", opts.Limit)}
+				return cmdutil.FlagErrorf("invalid limit: %v", opts.Limit)
 			}
 
 			if runF != nil {
@@ -61,6 +65,9 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 
 	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", defaultLimit, "Maximum number of runs to fetch")
 	cmd.Flags().StringVarP(&opts.WorkflowSelector, "workflow", "w", "", "Filter runs by workflow")
+	cmd.Flags().StringVarP(&opts.Branch, "branch", "b", "", "Filter runs by branch")
+	cmd.Flags().StringVarP(&opts.Actor, "user", "u", "", "Filter runs by user who triggered the run")
+	cmdutil.AddJSONFlags(cmd, &opts.Exporter, shared.RunFields)
 
 	return cmd
 }
@@ -80,34 +87,44 @@ func listRun(opts *ListOptions) error {
 	var runs []shared.Run
 	var workflow *workflowShared.Workflow
 
+	filters := &shared.FilterOptions{
+		Branch: opts.Branch,
+		Actor:  opts.Actor,
+	}
+
 	opts.IO.StartProgressIndicator()
 	if opts.WorkflowSelector != "" {
 		states := []workflowShared.WorkflowState{workflowShared.Active}
 		workflow, err = workflowShared.ResolveWorkflow(
 			opts.IO, client, baseRepo, false, opts.WorkflowSelector, states)
 		if err == nil {
-			runs, err = shared.GetRunsByWorkflow(client, baseRepo, opts.Limit, workflow.ID)
+			runs, err = shared.GetRunsByWorkflow(client, baseRepo, filters, opts.Limit, workflow.ID)
 		}
 	} else {
-		runs, err = shared.GetRuns(client, baseRepo, opts.Limit)
+		runs, err = shared.GetRuns(client, baseRepo, filters, opts.Limit)
 	}
 	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return fmt.Errorf("failed to get runs: %w", err)
 	}
 
+	if err := opts.IO.StartPager(); err == nil {
+		defer opts.IO.StopPager()
+	} else {
+		fmt.Fprintf(opts.IO.ErrOut, "failed to start pager: %v\n", err)
+	}
+
+	if opts.Exporter != nil {
+		return opts.Exporter.Write(opts.IO, runs)
+	}
+
+	if len(runs) == 0 {
+		return cmdutil.NewNoResultsError("no runs found")
+	}
+
 	tp := utils.NewTablePrinter(opts.IO)
 
 	cs := opts.IO.ColorScheme()
-
-	if len(runs) == 0 {
-		if !opts.PlainOutput {
-			fmt.Fprintln(opts.IO.ErrOut, "No runs found")
-		}
-		return nil
-	}
-
-	out := opts.IO.Out
 
 	if !opts.PlainOutput {
 		tp.AddField("STATUS", nil, nil)
@@ -149,11 +166,6 @@ func listRun(opts *ListOptions) error {
 	err = tp.Render()
 	if err != nil {
 		return err
-	}
-
-	if !opts.PlainOutput {
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "For details on a run, try: gh run view <run-id>")
 	}
 
 	return nil
