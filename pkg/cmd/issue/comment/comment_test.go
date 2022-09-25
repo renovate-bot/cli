@@ -3,16 +3,16 @@ package comment
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +20,7 @@ import (
 
 func TestNewCmdComment(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "my-body.md")
-	err := ioutil.WriteFile(tmpFile, []byte("a body from file"), 0600)
+	err := os.WriteFile(tmpFile, []byte("a body from file"), 0600)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -141,17 +141,17 @@ func TestNewCmdComment(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, stdin, _, _ := iostreams.Test()
-			io.SetStdoutTTY(true)
-			io.SetStdinTTY(true)
-			io.SetStderrTTY(true)
+			ios, stdin, _, _ := iostreams.Test()
+			ios.SetStdoutTTY(true)
+			ios.SetStdinTTY(true)
+			ios.SetStderrTTY(true)
 
 			if tt.stdin != "" {
 				_, _ = stdin.WriteString(tt.stdin)
 			}
 
 			f := &cmdutil.Factory{
-				IOStreams: io,
+				IOStreams: ios,
 				Browser:   &cmdutil.TestBrowser{},
 			}
 
@@ -203,7 +203,6 @@ func Test_commentRun(t *testing.T) {
 				ConfirmSubmitSurvey:   func() (bool, error) { return true, nil },
 			},
 			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockIssueFromNumber(t, reg)
 				mockCommentCreate(t, reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/issues/123#issuecomment-456\n",
@@ -217,9 +216,6 @@ func Test_commentRun(t *testing.T) {
 
 				OpenInBrowser: func(string) error { return nil },
 			},
-			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockIssueFromNumber(t, reg)
-			},
 			stderr: "Opening github.com/OWNER/REPO/issues/123 in your browser.\n",
 		},
 		{
@@ -232,7 +228,6 @@ func Test_commentRun(t *testing.T) {
 				EditSurvey: func() (string, error) { return "comment body", nil },
 			},
 			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockIssueFromNumber(t, reg)
 				mockCommentCreate(t, reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/issues/123#issuecomment-456\n",
@@ -245,28 +240,30 @@ func Test_commentRun(t *testing.T) {
 				Body:        "comment body",
 			},
 			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockIssueFromNumber(t, reg)
 				mockCommentCreate(t, reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/issues/123#issuecomment-456\n",
 		},
 	}
 	for _, tt := range tests {
-		io, _, stdout, stderr := iostreams.Test()
-		io.SetStdoutTTY(true)
-		io.SetStdinTTY(true)
-		io.SetStderrTTY(true)
+		ios, _, stdout, stderr := iostreams.Test()
+		ios.SetStdoutTTY(true)
+		ios.SetStdinTTY(true)
+		ios.SetStderrTTY(true)
 
 		reg := &httpmock.Registry{}
 		defer reg.Verify(t)
-		tt.httpStubs(t, reg)
+		if tt.httpStubs != nil {
+			tt.httpStubs(t, reg)
+		}
 
-		httpClient := func() (*http.Client, error) { return &http.Client{Transport: reg}, nil }
-		baseRepo := func() (ghrepo.Interface, error) { return ghrepo.New("OWNER", "REPO"), nil }
-
-		tt.input.IO = io
-		tt.input.HttpClient = httpClient
-		tt.input.RetrieveCommentable = retrieveIssue(tt.input.HttpClient, baseRepo, "123")
+		tt.input.IO = ios
+		tt.input.HttpClient = func() (*http.Client, error) {
+			return &http.Client{Transport: reg}, nil
+		}
+		tt.input.RetrieveCommentable = func() (shared.Commentable, ghrepo.Interface, error) {
+			return &mockCommentable{}, ghrepo.New("OWNER", "REPO"), nil
+		}
 
 		t.Run(tt.name, func(t *testing.T) {
 			err := shared.CommentableRun(tt.input)
@@ -277,15 +274,13 @@ func Test_commentRun(t *testing.T) {
 	}
 }
 
-func mockIssueFromNumber(_ *testing.T, reg *httpmock.Registry) {
-	reg.Register(
-		httpmock.GraphQL(`query IssueByNumber\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "hasIssuesEnabled": true, "issue": {
-				"number": 123,
-				"url": "https://github.com/OWNER/REPO/issues/123"
-			} } } }`),
-	)
+type mockCommentable struct{}
+
+func (c mockCommentable) Identifier() string {
+	return "ISSUE-ID"
+}
+func (c mockCommentable) Link() string {
+	return "https://github.com/OWNER/REPO/issues/123"
 }
 
 func mockCommentCreate(t *testing.T, reg *httpmock.Registry) {
@@ -296,6 +291,7 @@ func mockCommentCreate(t *testing.T, reg *httpmock.Registry) {
 			"url": "https://github.com/OWNER/REPO/issues/123#issuecomment-456"
 		} } } } }`,
 			func(inputs map[string]interface{}) {
+				assert.Equal(t, "ISSUE-ID", inputs["subjectId"])
 				assert.Equal(t, "comment body", inputs["body"])
 			}),
 	)

@@ -1,20 +1,20 @@
 package view
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	runShared "github.com/cli/cli/pkg/cmd/run/shared"
-	"github.com/cli/cli/pkg/cmd/workflow/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/markdown"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	runShared "github.com/cli/cli/v2/pkg/cmd/run/shared"
+	"github.com/cli/cli/v2/pkg/cmd/workflow/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/markdown"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -59,13 +59,13 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 			if len(args) > 0 {
 				opts.Selector = args[0]
 			} else if !opts.IO.CanPrompt() {
-				return &cmdutil.FlagError{Err: errors.New("workflow argument required when not running interactively")}
+				return cmdutil.FlagErrorf("workflow argument required when not running interactively")
 			} else {
 				opts.Prompt = true
 			}
 
 			if !opts.YAML && opts.Ref != "" {
-				return &cmdutil.FlagError{Err: errors.New("`--yaml` required when specifying `--ref`")}
+				return cmdutil.FlagErrorf("`--yaml` required when specifying `--ref`")
 			}
 
 			if runF != nil {
@@ -102,7 +102,7 @@ func runView(opts *ViewOptions) error {
 	}
 
 	if opts.Web {
-		var url string
+		var address string
 		if opts.YAML {
 			ref := opts.Ref
 			if ref == "" {
@@ -113,20 +113,27 @@ func runView(opts *ViewOptions) error {
 					return err
 				}
 			}
-			url = ghrepo.GenerateRepoURL(repo, "blob/%s/%s", ref, workflow.Path)
+			address = ghrepo.GenerateRepoURL(repo, "blob/%s/%s", url.QueryEscape(ref), url.QueryEscape(workflow.Path))
 		} else {
-			url = ghrepo.GenerateRepoURL(repo, "actions/workflows/%s", workflow.Base())
+			address = ghrepo.GenerateRepoURL(repo, "actions/workflows/%s", url.QueryEscape(workflow.Base()))
 		}
 		if opts.IO.IsStdoutTTY() {
-			fmt.Fprintf(opts.IO.Out, "Opening %s in your browser.\n", utils.DisplayURL(url))
+			fmt.Fprintf(opts.IO.Out, "Opening %s in your browser.\n", utils.DisplayURL(address))
 		}
-		return opts.Browser.Browse(url)
+		return opts.Browser.Browse(address)
+	}
+
+	opts.IO.DetectTerminalTheme()
+	if err := opts.IO.StartPager(); err == nil {
+		defer opts.IO.StopPager()
+	} else {
+		fmt.Fprintf(opts.IO.ErrOut, "failed to start pager: %v\n", err)
 	}
 
 	if opts.YAML {
-		err = viewWorkflowContent(opts, client, workflow)
+		err = viewWorkflowContent(opts, client, repo, workflow, opts.Ref)
 	} else {
-		err = viewWorkflowInfo(opts, client, workflow)
+		err = viewWorkflowInfo(opts, client, repo, workflow)
 	}
 	if err != nil {
 		return err
@@ -135,19 +142,12 @@ func runView(opts *ViewOptions) error {
 	return nil
 }
 
-func viewWorkflowContent(opts *ViewOptions, client *api.Client, workflow *shared.Workflow) error {
-	repo, err := opts.BaseRepo()
-	if err != nil {
-		return fmt.Errorf("could not determine base repo: %w", err)
-	}
-
-	opts.IO.StartProgressIndicator()
-	yamlBytes, err := shared.GetWorkflowContent(client, repo, *workflow, opts.Ref)
-	opts.IO.StopProgressIndicator()
+func viewWorkflowContent(opts *ViewOptions, client *api.Client, repo ghrepo.Interface, workflow *shared.Workflow, ref string) error {
+	yamlBytes, err := shared.GetWorkflowContent(client, repo, *workflow, ref)
 	if err != nil {
 		if s, ok := err.(api.HTTPError); ok && s.StatusCode == 404 {
-			if opts.Ref != "" {
-				return fmt.Errorf("could not find workflow file %s on %s, try specifying a different ref", workflow.Base(), opts.Ref)
+			if ref != "" {
+				return fmt.Errorf("could not find workflow file %s on %s, try specifying a different ref", workflow.Base(), ref)
 			}
 			return fmt.Errorf("could not find workflow file %s, try specifying a branch or tag using `--ref`", workflow.Base())
 		}
@@ -155,13 +155,6 @@ func viewWorkflowContent(opts *ViewOptions, client *api.Client, workflow *shared
 	}
 
 	yaml := string(yamlBytes)
-
-	theme := opts.IO.DetectTerminalTheme()
-	markdownStyle := markdown.GetStyle(theme)
-	if err := opts.IO.StartPager(); err != nil {
-		fmt.Fprintf(opts.IO.ErrOut, "starting pager failed: %v\n", err)
-	}
-	defer opts.IO.StopPager()
 
 	if !opts.Raw {
 		cs := opts.IO.ColorScheme()
@@ -172,11 +165,7 @@ func viewWorkflowContent(opts *ViewOptions, client *api.Client, workflow *shared
 		fmt.Fprintf(out, "ID: %s", cs.Cyanf("%d", workflow.ID))
 
 		codeBlock := fmt.Sprintf("```yaml\n%s\n```", yaml)
-		rendered, err := markdown.RenderWithOpts(codeBlock, markdownStyle,
-			markdown.RenderOpts{
-				markdown.WithoutIndentation(),
-				markdown.WithoutWrap(),
-			})
+		rendered, err := markdown.Render(codeBlock, markdown.WithIO(opts.IO), markdown.WithoutIndentation(), markdown.WithWrap(0))
 		if err != nil {
 			return err
 		}
@@ -196,15 +185,8 @@ func viewWorkflowContent(opts *ViewOptions, client *api.Client, workflow *shared
 	return nil
 }
 
-func viewWorkflowInfo(opts *ViewOptions, client *api.Client, workflow *shared.Workflow) error {
-	repo, err := opts.BaseRepo()
-	if err != nil {
-		return fmt.Errorf("could not determine base repo: %w", err)
-	}
-
-	opts.IO.StartProgressIndicator()
+func viewWorkflowInfo(opts *ViewOptions, client *api.Client, repo ghrepo.Interface, workflow *shared.Workflow) error {
 	wr, err := getWorkflowRuns(client, repo, workflow)
-	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return fmt.Errorf("failed to get runs: %w", err)
 	}

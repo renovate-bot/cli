@@ -1,19 +1,19 @@
 package view
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/markdown"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/markdown"
+	"github.com/cli/cli/v2/pkg/text"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -55,7 +55,7 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 			opts.Finder = shared.NewFinder(f)
 
 			if repoOverride, _ := cmd.Flags().GetString("repo"); repoOverride != "" && len(args) == 0 {
-				return &cmdutil.FlagError{Err: errors.New("argument required when using the --repo flag")}
+				return cmdutil.FlagErrorf("argument required when using the --repo flag")
 			}
 
 			if len(args) > 0 {
@@ -99,7 +99,7 @@ func viewRun(opts *ViewOptions) error {
 		return err
 	}
 
-	connectedToTerminal := opts.IO.IsStdoutTTY() && opts.IO.IsStderrTTY()
+	connectedToTerminal := opts.IO.IsStdoutTTY()
 
 	if opts.BrowserMode {
 		openURL := pr.URL
@@ -110,15 +110,14 @@ func viewRun(opts *ViewOptions) error {
 	}
 
 	opts.IO.DetectTerminalTheme()
-
-	err = opts.IO.StartPager()
-	if err != nil {
-		return err
+	if err := opts.IO.StartPager(); err == nil {
+		defer opts.IO.StopPager()
+	} else {
+		fmt.Fprintf(opts.IO.ErrOut, "failed to start pager: %v\n", err)
 	}
-	defer opts.IO.StopPager()
 
 	if opts.Exporter != nil {
-		return opts.Exporter.Write(opts.IO.Out, pr, opts.IO.ColorEnabled())
+		return opts.Exporter.Write(opts.IO, pr)
 	}
 
 	if connectedToTerminal {
@@ -139,7 +138,7 @@ func printRawPrPreview(io *iostreams.IOStreams, pr *api.PullRequest) error {
 
 	reviewers := prReviewerList(*pr, cs)
 	assignees := prAssigneeList(*pr)
-	labels := prLabelList(*pr)
+	labels := prLabelList(*pr, cs)
 	projects := prProjectList(*pr)
 
 	fmt.Fprintf(out, "title:\t%s\n", pr.Title)
@@ -197,7 +196,7 @@ func printHumanPrPreview(opts *ViewOptions, pr *api.PullRequest) error {
 		fmt.Fprint(out, cs.Bold("Assignees: "))
 		fmt.Fprintln(out, assignees)
 	}
-	if labels := prLabelList(*pr); labels != "" {
+	if labels := prLabelList(*pr, cs); labels != "" {
 		fmt.Fprint(out, cs.Bold("Labels: "))
 		fmt.Fprintln(out, labels)
 	}
@@ -216,8 +215,7 @@ func printHumanPrPreview(opts *ViewOptions, pr *api.PullRequest) error {
 	if pr.Body == "" {
 		md = fmt.Sprintf("\n  %s\n\n", cs.Gray("No description provided"))
 	} else {
-		style := markdown.GetStyle(opts.IO.TerminalTheme())
-		md, err = markdown.Render(pr.Body, style)
+		md, err = markdown.Render(pr.Body, markdown.WithIO(opts.IO))
 		if err != nil {
 			return err
 		}
@@ -256,26 +254,23 @@ type reviewerState struct {
 
 // formattedReviewerState formats a reviewerState with state color
 func formattedReviewerState(cs *iostreams.ColorScheme, reviewer *reviewerState) string {
-	state := reviewer.State
-	if state == dismissedReviewState {
+	var displayState string
+	switch reviewer.State {
+	case requestedReviewState:
+		displayState = cs.Yellow("Requested")
+	case approvedReviewState:
+		displayState = cs.Green("Approved")
+	case changesRequestedReviewState:
+		displayState = cs.Red("Changes requested")
+	case commentedReviewState, dismissedReviewState:
 		// Show "DISMISSED" review as "COMMENTED", since "dismissed" only makes
 		// sense when displayed in an events timeline but not in the final tally.
-		state = commentedReviewState
-	}
-
-	var colorFunc func(string) string
-	switch state {
-	case requestedReviewState:
-		colorFunc = cs.Yellow
-	case approvedReviewState:
-		colorFunc = cs.Green
-	case changesRequestedReviewState:
-		colorFunc = cs.Red
+		displayState = "Commented"
 	default:
-		colorFunc = func(str string) string { return str } // Do nothing
+		displayState = text.Title(reviewer.State)
 	}
 
-	return fmt.Sprintf("%s (%s)", reviewer.Name, colorFunc(strings.ReplaceAll(strings.Title(strings.ToLower(state)), "_", " ")))
+	return fmt.Sprintf("%s (%s)", reviewer.Name, displayState)
 }
 
 // prReviewerList generates a reviewer list with their last state
@@ -367,14 +362,14 @@ func prAssigneeList(pr api.PullRequest) string {
 	return list
 }
 
-func prLabelList(pr api.PullRequest) string {
+func prLabelList(pr api.PullRequest, cs *iostreams.ColorScheme) string {
 	if len(pr.Labels.Nodes) == 0 {
 		return ""
 	}
 
 	labelNames := make([]string, 0, len(pr.Labels.Nodes))
 	for _, label := range pr.Labels.Nodes {
-		labelNames = append(labelNames, label.Name)
+		labelNames = append(labelNames, cs.HexToRGB(label.Color, label.Name))
 	}
 
 	list := strings.Join(labelNames, ", ")

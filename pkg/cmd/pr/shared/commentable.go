@@ -8,13 +8,13 @@ import (
 	"net/http"
 
 	"github.com/AlecAivazis/survey/v2"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/surveyext"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/surveyext"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -42,6 +42,7 @@ type CommentableOptions struct {
 	Interactive           bool
 	InputType             InputType
 	Body                  string
+	Quiet                 bool
 }
 
 func CommentablePreRun(cmd *cobra.Command, opts *CommentableOptions) error {
@@ -65,15 +66,11 @@ func CommentablePreRun(cmd *cobra.Command, opts *CommentableOptions) error {
 
 	if inputFlags == 0 {
 		if !opts.IO.CanPrompt() {
-			return &cmdutil.FlagError{Err: errors.New("`--body`, `--body-file` or `--web` required when not running interactively")}
+			return cmdutil.FlagErrorf("flags required when not running interactively")
 		}
 		opts.Interactive = true
-	} else if inputFlags == 1 {
-		if !opts.IO.CanPrompt() && opts.InputType == InputTypeEditor {
-			return &cmdutil.FlagError{Err: errors.New("`--body`, `--body-file` or `--web` required when not running interactively")}
-		}
 	} else if inputFlags > 1 {
-		return &cmdutil.FlagError{Err: fmt.Errorf("specify only one of `--body`, `--body-file`, `--editor`, or `--web`")}
+		return cmdutil.FlagErrorf("specify only one of `--body`, `--body-file`, `--editor`, or `--web`")
 	}
 
 	return nil
@@ -88,7 +85,7 @@ func CommentableRun(opts *CommentableOptions) error {
 	switch opts.InputType {
 	case InputTypeWeb:
 		openURL := commentable.Link() + "#issuecomment-new"
-		if opts.IO.IsStdoutTTY() {
+		if opts.IO.IsStdoutTTY() && !opts.Quiet {
 			fmt.Fprintf(opts.IO.ErrOut, "Opening %s in your browser.\n", utils.DisplayURL(openURL))
 		}
 		return opts.OpenInBrowser(openURL)
@@ -125,7 +122,9 @@ func CommentableRun(opts *CommentableOptions) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(opts.IO.Out, url)
+	if !opts.Quiet {
+		fmt.Fprintln(opts.IO.Out, url)
+	}
 	return nil
 }
 
@@ -145,13 +144,10 @@ func CommentableInteractiveEditSurvey(cf func() (config.Config, error), io *iost
 		if err != nil {
 			return "", err
 		}
-		if editorCommand == "" {
-			editorCommand = surveyext.DefaultEditorName()
-		}
 		cs := io.ColorScheme()
-		fmt.Fprintf(io.Out, "- %s to draft your comment in %s... ", cs.Bold("Press Enter"), cs.Bold(editorCommand))
+		fmt.Fprintf(io.Out, "- %s to draft your comment in %s... ", cs.Bold("Press Enter"), cs.Bold(surveyext.EditorName(editorCommand)))
 		_ = waitForEnter(io.In)
-		return surveyext.Edit(editorCommand, "*.md", "", io.In, io.Out, io.ErrOut, nil)
+		return surveyext.Edit(editorCommand, "*.md", "", io.In, io.Out, io.ErrOut)
 	}
 }
 
@@ -161,7 +157,7 @@ func CommentableEditSurvey(cf func() (config.Config, error), io *iostreams.IOStr
 		if err != nil {
 			return "", err
 		}
-		return surveyext.Edit(editorCommand, "*.md", "", io.In, io.Out, io.ErrOut, nil)
+		return surveyext.Edit(editorCommand, "*.md", "", io.In, io.Out, io.ErrOut)
 	}
 }
 

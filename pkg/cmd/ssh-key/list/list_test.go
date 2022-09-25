@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
 )
 
 func TestListRun(t *testing.T) {
@@ -88,7 +88,7 @@ func TestListRun(t *testing.T) {
 			wantStderr: "",
 		},
 		{
-			name: "no keys",
+			name: "no keys tty",
 			opts: ListOptions{
 				HTTPClient: func() (*http.Client, error) {
 					reg := &httpmock.Registry{}
@@ -100,25 +100,43 @@ func TestListRun(t *testing.T) {
 				},
 			},
 			wantStdout: "",
-			wantStderr: "No SSH keys present in GitHub account.\n",
+			wantStderr: "",
 			wantErr:    true,
+			isTTY:      true,
+		},
+		{
+			name: "no keys non-tty",
+			opts: ListOptions{
+				HTTPClient: func() (*http.Client, error) {
+					reg := &httpmock.Registry{}
+					reg.Register(
+						httpmock.REST("GET", "user/keys"),
+						httpmock.StringResponse(`[]`),
+					)
+					return &http.Client{Transport: reg}, nil
+				},
+			},
+			wantStdout: "",
+			wantStderr: "",
+			wantErr:    true,
+			isTTY:      false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, _, stdout, stderr := iostreams.Test()
-			io.SetStdoutTTY(tt.isTTY)
-			io.SetStdinTTY(tt.isTTY)
-			io.SetStderrTTY(tt.isTTY)
+			ios, _, stdout, stderr := iostreams.Test()
+			ios.SetStdoutTTY(tt.isTTY)
+			ios.SetStdinTTY(tt.isTTY)
+			ios.SetStderrTTY(tt.isTTY)
 
 			opts := tt.opts
-			opts.IO = io
+			opts.IO = ios
 			opts.Config = func() (config.Config, error) { return config.NewBlankConfig(), nil }
 
 			err := listRun(&opts)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("linRun() return error: %v", err)
+				t.Errorf("listRun() return error: %v", err)
 				return
 			}
 

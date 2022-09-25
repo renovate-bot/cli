@@ -6,15 +6,16 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/spf13/cobra"
 )
 
 const tokenUser = "x-access-token"
 
 type config interface {
-	GetWithSource(string, string) (string, string, error)
+	AuthToken(string) (string, string)
+	Get(string, string) (string, error)
 }
 
 type CredentialOptions struct {
@@ -100,12 +101,21 @@ func helperRun(opts *CredentialOptions) error {
 		return err
 	}
 
+	lookupHost := wants["host"]
 	var gotUser string
-	gotToken, source, _ := cfg.GetWithSource(wants["host"], "oauth_token")
+	gotToken, source := cfg.AuthToken(lookupHost)
+	if gotToken == "" && strings.HasPrefix(lookupHost, "gist.") {
+		lookupHost = strings.TrimPrefix(lookupHost, "gist.")
+		gotToken, source = cfg.AuthToken(lookupHost)
+	}
+
 	if strings.HasSuffix(source, "_TOKEN") {
 		gotUser = tokenUser
 	} else {
-		gotUser, _, _ = cfg.GetWithSource(wants["host"], "user")
+		gotUser, _ = cfg.Get(lookupHost, "user")
+		if gotUser == "" {
+			gotUser = tokenUser
+		}
 	}
 
 	if gotUser == "" || gotToken == "" {
