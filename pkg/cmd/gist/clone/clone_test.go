@@ -5,20 +5,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/test"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/test"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 )
 
 func runCloneCommand(httpClient *http.Client, cli string) (*test.CmdOut, error) {
-	io, stdin, stdout, stderr := iostreams.Test()
+	ios, stdin, stdout, stderr := iostreams.Test()
 	fac := &cmdutil.Factory{
-		IOStreams: io,
+		IOStreams: ios,
 		HttpClient: func() (*http.Client, error) {
 			return httpClient, nil
 		},
@@ -33,7 +33,7 @@ func runCloneCommand(httpClient *http.Client, cli string) (*test.CmdOut, error) 
 	cmd.SetArgs(argv)
 
 	cmd.SetIn(stdin)
-	cmd.SetOut(stdout)
+	cmd.SetOut(stderr)
 	cmd.SetErr(stderr)
 
 	if err != nil {

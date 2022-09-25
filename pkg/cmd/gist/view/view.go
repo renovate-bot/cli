@@ -8,15 +8,15 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghinstance"
-	"github.com/cli/cli/pkg/cmd/gist/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/markdown"
-	"github.com/cli/cli/pkg/prompt"
-	"github.com/cli/cli/pkg/text"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/pkg/cmd/gist/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/markdown"
+	"github.com/cli/cli/v2/pkg/prompt"
+	"github.com/cli/cli/v2/pkg/text"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -68,7 +68,7 @@ func NewCmdView(f *cmdutil.Factory, runF func(*ViewOptions) error) *cobra.Comman
 
 	cmd.Flags().BoolVarP(&opts.Raw, "raw", "r", false, "Print raw instead of rendered gist contents")
 	cmd.Flags().BoolVarP(&opts.Web, "web", "w", false, "Open gist in the browser")
-	cmd.Flags().BoolVarP(&opts.ListFiles, "files", "", false, "List file names from the gist")
+	cmd.Flags().BoolVar(&opts.ListFiles, "files", false, "List file names from the gist")
 	cmd.Flags().StringVarP(&opts.Filename, "filename", "f", "", "Display a single file from the gist")
 
 	return cmd
@@ -86,10 +86,7 @@ func viewRun(opts *ViewOptions) error {
 		return err
 	}
 
-	hostname, err := cfg.DefaultHost()
-	if err != nil {
-		return err
-	}
+	hostname, _ := cfg.DefaultHost()
 
 	cs := opts.IO.ColorScheme()
 	if gistID == "" {
@@ -128,8 +125,7 @@ func viewRun(opts *ViewOptions) error {
 		return err
 	}
 
-	theme := opts.IO.DetectTerminalTheme()
-	markdownStyle := markdown.GetStyle(theme)
+	opts.IO.DetectTerminalTheme()
 	if err := opts.IO.StartPager(); err != nil {
 		fmt.Fprintf(opts.IO.ErrOut, "starting pager failed: %v\n", err)
 	}
@@ -145,7 +141,7 @@ func viewRun(opts *ViewOptions) error {
 		}
 
 		if strings.Contains(gf.Type, "markdown") && !opts.Raw {
-			rendered, err := markdown.Render(gf.Content, markdownStyle)
+			rendered, err := markdown.Render(gf.Content, markdown.WithIO(opts.IO))
 			if err != nil {
 				return err
 			}
