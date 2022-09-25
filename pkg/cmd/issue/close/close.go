@@ -1,15 +1,20 @@
 package close
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/issue/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/issue/shared"
+	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	graphql "github.com/cli/shurcooL-graphql"
+	"github.com/shurcooL/githubv4"
 	"github.com/spf13/cobra"
 )
 
@@ -20,6 +25,7 @@ type CloseOptions struct {
 	BaseRepo   func() (ghrepo.Interface, error)
 
 	SelectorArg string
+	Comment     string
 }
 
 func NewCmdClose(f *cmdutil.Factory, runF func(*CloseOptions) error) *cobra.Command {
@@ -48,6 +54,8 @@ func NewCmdClose(f *cmdutil.Factory, runF func(*CloseOptions) error) *cobra.Comm
 		},
 	}
 
+	cmd.Flags().StringVarP(&opts.Comment, "comment", "c", "", "Leave a closing comment")
+
 	return cmd
 }
 
@@ -58,9 +66,8 @@ func closeRun(opts *CloseOptions) error {
 	if err != nil {
 		return err
 	}
-	apiClient := api.NewClientFromHTTP(httpClient)
 
-	issue, baseRepo, err := shared.IssueFromArg(apiClient, opts.BaseRepo, opts.SelectorArg)
+	issue, baseRepo, err := shared.IssueFromArgWithFields(httpClient, opts.BaseRepo, opts.SelectorArg, []string{"id", "number", "title", "state"})
 	if err != nil {
 		return err
 	}
@@ -70,7 +77,23 @@ func closeRun(opts *CloseOptions) error {
 		return nil
 	}
 
-	err = api.IssueClose(apiClient, baseRepo, *issue)
+	if opts.Comment != "" {
+		commentOpts := &prShared.CommentableOptions{
+			Body:       opts.Comment,
+			HttpClient: opts.HttpClient,
+			InputType:  prShared.InputTypeInline,
+			Quiet:      true,
+			RetrieveCommentable: func() (prShared.Commentable, ghrepo.Interface, error) {
+				return issue, baseRepo, nil
+			},
+		}
+		err := prShared.CommentableRun(commentOpts)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = apiClose(httpClient, baseRepo, issue)
 	if err != nil {
 		return err
 	}
@@ -78,4 +101,27 @@ func closeRun(opts *CloseOptions) error {
 	fmt.Fprintf(opts.IO.ErrOut, "%s Closed issue #%d (%s)\n", cs.SuccessIconWithColor(cs.Red), issue.Number, issue.Title)
 
 	return nil
+}
+
+func apiClose(httpClient *http.Client, repo ghrepo.Interface, issue *api.Issue) error {
+	if issue.IsPullRequest() {
+		return api.PullRequestClose(httpClient, repo, issue.ID)
+	}
+
+	var mutation struct {
+		CloseIssue struct {
+			Issue struct {
+				ID githubv4.ID
+			}
+		} `graphql:"closeIssue(input: $input)"`
+	}
+
+	variables := map[string]interface{}{
+		"input": githubv4.CloseIssueInput{
+			IssueID: issue.ID,
+		},
+	}
+
+	gql := graphql.NewClient(ghinstance.GraphQLEndpoint(repo.RepoHost()), httpClient)
+	return gql.MutateNamed(context.Background(), "IssueClose", &mutation, variables)
 }

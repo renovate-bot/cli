@@ -4,15 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
 	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghinstance"
-	"github.com/cli/cli/internal/ghrepo"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/internal/ghrepo"
 )
 
 var ReleaseFields = []string{
@@ -35,6 +35,7 @@ var ReleaseFields = []string{
 }
 
 type Release struct {
+	DatabaseID   int64      `json:"id"`
 	ID           string     `json:"node_id"`
 	TagName      string     `json:"tag_name"`
 	Name         string     `json:"name"`
@@ -74,7 +75,7 @@ type ReleaseAsset struct {
 	BrowserDownloadURL string    `json:"browser_download_url"`
 }
 
-func (rel *Release) ExportData(fields []string) *map[string]interface{} {
+func (rel *Release) ExportData(fields []string) map[string]interface{} {
 	v := reflect.ValueOf(rel).Elem()
 	fieldByName := func(v reflect.Value, field string) reflect.Value {
 		return v.FieldByNameFunc(func(s string) bool {
@@ -114,7 +115,7 @@ func (rel *Release) ExportData(fields []string) *map[string]interface{} {
 		}
 	}
 
-	return &data
+	return data
 }
 
 // FetchRelease finds a repository release by its tagName.
@@ -140,7 +141,7 @@ func FetchRelease(httpClient *http.Client, baseRepo ghrepo.Interface, tagName st
 		return nil, api.HandleHTTPError(resp)
 	}
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +174,7 @@ func FetchLatestRelease(httpClient *http.Client, baseRepo ghrepo.Interface) (*Re
 		return nil, api.HandleHTTPError(resp)
 	}
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +211,7 @@ func FindDraftRelease(httpClient *http.Client, baseRepo ghrepo.Interface, tagNam
 			return nil, api.HandleHTTPError(resp)
 		}
 
-		b, err := ioutil.ReadAll(resp.Body)
+		b, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, err
 		}

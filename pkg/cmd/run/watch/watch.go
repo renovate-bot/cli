@@ -1,19 +1,18 @@
 package watch
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/run/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/run/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -57,7 +56,7 @@ func NewCmdWatch(f *cmdutil.Factory, runF func(*WatchOptions) error) *cobra.Comm
 			if len(args) > 0 {
 				opts.RunID = args[0]
 			} else if !opts.IO.CanPrompt() {
-				return &cmdutil.FlagError{Err: errors.New("run ID required when not running interactively")}
+				return cmdutil.FlagErrorf("run ID required when not running interactively")
 			} else {
 				opts.Prompt = true
 			}
@@ -94,7 +93,7 @@ func watchRun(opts *WatchOptions) error {
 	var run *shared.Run
 
 	if opts.Prompt {
-		runs, err := shared.GetRunsWithFilter(client, repo, 10, func(run shared.Run) bool {
+		runs, err := shared.GetRunsWithFilter(client, repo, nil, 10, func(run shared.Run) bool {
 			return run.Status != shared.Completed
 		})
 		if err != nil {
@@ -123,6 +122,9 @@ func watchRun(opts *WatchOptions) error {
 
 	if run.Status == shared.Completed {
 		fmt.Fprintf(out, "Run %s (%s) has already completed with '%s'\n", cs.Bold(run.Name), cs.Cyanf("%d", run.ID), run.Conclusion)
+		if opts.ExitStatus && run.Conclusion != shared.Success {
+			return cmdutil.SilentError
+		}
 		return nil
 	}
 
@@ -132,9 +134,10 @@ func watchRun(opts *WatchOptions) error {
 		prNumber = fmt.Sprintf(" #%d", number)
 	}
 
-	opts.IO.EnableVirtualTerminalProcessing()
-	// clear entire screen
-	fmt.Fprintf(out, "\x1b[2J")
+	if err := opts.IO.EnableVirtualTerminalProcessing(); err == nil {
+		// clear entire screen
+		fmt.Fprintf(out, "\x1b[2J")
+	}
 
 	annotationCache := map[int64][]shared.Annotation{}
 

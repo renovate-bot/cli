@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/text"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/text"
 )
 
 type TablePrinter interface {
@@ -17,15 +17,41 @@ type TablePrinter interface {
 	Render() error
 }
 
+type TablePrinterOptions struct {
+	IsTTY    bool
+	MaxWidth int
+	Out      io.Writer
+}
+
 func NewTablePrinter(io *iostreams.IOStreams) TablePrinter {
-	if io.IsStdoutTTY() {
+	return NewTablePrinterWithOptions(io, TablePrinterOptions{
+		IsTTY: io.IsStdoutTTY(),
+	})
+}
+
+func NewTablePrinterWithOptions(ios *iostreams.IOStreams, opts TablePrinterOptions) TablePrinter {
+	var out io.Writer
+	if opts.Out != nil {
+		out = opts.Out
+	} else {
+		out = ios.Out
+	}
+	if opts.IsTTY {
+		var maxWidth int
+		if opts.MaxWidth > 0 {
+			maxWidth = opts.MaxWidth
+		} else if ios.IsStdoutTTY() {
+			maxWidth = ios.TerminalWidth()
+		} else {
+			maxWidth = ios.ProcessTerminalWidth()
+		}
 		return &ttyTablePrinter{
-			out:      io.Out,
-			maxWidth: io.TerminalWidth(),
+			out:      out,
+			maxWidth: maxWidth,
 		}
 	}
 	return &tsvTablePrinter{
-		out: io.Out,
+		out: out,
 	}
 }
 
@@ -49,7 +75,6 @@ func (t ttyTablePrinter) IsTTY() bool {
 	return true
 }
 
-// Never pass pre-colorized text to AddField; always specify colorFunc. Otherwise, the table printer can't correctly compute the width of its columns.
 func (t *ttyTablePrinter) AddField(s string, truncateFunc func(int, string) string, colorFunc func(string) string) {
 	if truncateFunc == nil {
 		truncateFunc = text.Truncate
@@ -179,7 +204,7 @@ func (t *ttyTablePrinter) calculateColumnWidths(delimSize int) []int {
 				}
 				if max := maxColWidths[col]; max < perColumn {
 					colWidths[col] = max
-				} else {
+				} else if perColumn > 0 {
 					colWidths[col] = perColumn
 				}
 			}

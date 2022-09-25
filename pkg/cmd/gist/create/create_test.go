@@ -3,26 +3,27 @@ package create
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
-	"path"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/cmd/gist/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmd/gist/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_processFiles(t *testing.T) {
 	fakeStdin := strings.NewReader("hey cool how is it going")
-	files, err := processFiles(ioutil.NopCloser(fakeStdin), "", []string{"-"})
+	files, err := processFiles(io.NopCloser(fakeStdin), "", []string{"-"})
 	if err != nil {
 		t.Fatalf("unexpected error processing files: %s", err)
 	}
@@ -126,9 +127,9 @@ func TestNewCmdCreate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, _, _, _ := iostreams.Test()
+			ios, _, _, _ := iostreams.Test()
 			f := &cmdutil.Factory{
-				IOStreams: io,
+				IOStreams: ios,
 			}
 
 			if tt.factory != nil {
@@ -163,10 +164,10 @@ func TestNewCmdCreate(t *testing.T) {
 
 func Test_createRun(t *testing.T) {
 	tempDir := t.TempDir()
-	fixtureFile := path.Join(tempDir, "fixture.txt")
-	assert.NoError(t, ioutil.WriteFile(fixtureFile, []byte("{}"), 0644))
-	emptyFile := path.Join(tempDir, "empty.txt")
-	assert.NoError(t, ioutil.WriteFile(emptyFile, []byte(" \t\n"), 0644))
+	fixtureFile := filepath.Join(tempDir, "fixture.txt")
+	assert.NoError(t, os.WriteFile(fixtureFile, []byte("{}"), 0644))
+	emptyFile := filepath.Join(tempDir, "empty.txt")
+	assert.NoError(t, os.WriteFile(emptyFile, []byte(" \t\n"), 0644))
 
 	tests := []struct {
 		name           string
@@ -333,8 +334,8 @@ func Test_createRun(t *testing.T) {
 			return config.NewBlankConfig(), nil
 		}
 
-		io, stdin, stdout, stderr := iostreams.Test()
-		tt.opts.IO = io
+		ios, stdin, stdout, stderr := iostreams.Test()
+		tt.opts.IO = ios
 
 		browser := &cmdutil.TestBrowser{}
 		tt.opts.Browser = browser
@@ -348,7 +349,7 @@ func Test_createRun(t *testing.T) {
 			if err := createRun(tt.opts); (err != nil) != tt.wantErr {
 				t.Errorf("createRun() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			bodyBytes, _ := ioutil.ReadAll(reg.Requests[0].Body)
+			bodyBytes, _ := io.ReadAll(reg.Requests[0].Body)
 			reqBody := make(map[string]interface{})
 			err := json.Unmarshal(bodyBytes, &reqBody)
 			if err != nil {
@@ -387,33 +388,4 @@ func Test_detectEmptyFiles(t *testing.T) {
 		isEmptyFile := detectEmptyFiles(files)
 		assert.Equal(t, tt.isEmptyFile, isEmptyFile)
 	}
-}
-
-func Test_CreateRun_reauth(t *testing.T) {
-	reg := &httpmock.Registry{}
-	reg.Register(httpmock.REST("POST", "gists"), func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: 404,
-			Request:    req,
-			Header: map[string][]string{
-				"X-Oauth-Scopes": {"repo, read:org"},
-			},
-			Body: ioutil.NopCloser(bytes.NewBufferString("oh no")),
-		}, nil
-	})
-
-	io, _, _, _ := iostreams.Test()
-
-	opts := &CreateOptions{
-		IO: io,
-		HttpClient: func() (*http.Client, error) {
-			return &http.Client{Transport: reg}, nil
-		},
-		Config: func() (config.Config, error) {
-			return config.NewBlankConfig(), nil
-		},
-	}
-
-	err := createRun(opts)
-	assert.EqualError(t, err, "This command requires the 'gist' OAuth scope.\nPlease re-authenticate with:  gh auth refresh -h github.com -s gist")
 }
