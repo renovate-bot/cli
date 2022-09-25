@@ -5,18 +5,34 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"testing"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/prompt"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/prompt"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 )
+
+func stubHomeDir(t *testing.T, dir string) {
+	homeEnv := "HOME"
+	switch runtime.GOOS {
+	case "windows":
+		homeEnv = "USERPROFILE"
+	case "plan9":
+		homeEnv = "home"
+	}
+	oldHomeDir := os.Getenv(homeEnv)
+	os.Setenv(homeEnv, dir)
+	t.Cleanup(func() {
+		os.Setenv(homeEnv, oldHomeDir)
+	})
+}
 
 func Test_NewCmdLogin(t *testing.T) {
 	tests := []struct {
@@ -50,13 +66,19 @@ func Test_NewCmdLogin(t *testing.T) {
 			name:     "nontty, hostname",
 			stdinTTY: false,
 			cli:      "--hostname claire.redfield",
-			wantsErr: true,
+			wants: LoginOptions{
+				Hostname: "claire.redfield",
+				Token:    "",
+			},
 		},
 		{
 			name:     "nontty",
 			stdinTTY: false,
 			cli:      "",
-			wantsErr: true,
+			wants: LoginOptions{
+				Hostname: "github.com",
+				Token:    "",
+			},
 		},
 		{
 			name:  "nontty, with-token, hostname",
@@ -102,8 +124,9 @@ func Test_NewCmdLogin(t *testing.T) {
 			stdinTTY: true,
 			cli:      "--web",
 			wants: LoginOptions{
-				Hostname: "github.com",
-				Web:      true,
+				Hostname:    "github.com",
+				Web:         true,
+				Interactive: true,
 			},
 		},
 		{
@@ -145,13 +168,13 @@ func Test_NewCmdLogin(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, stdin, _, _ := iostreams.Test()
+			ios, stdin, _, _ := iostreams.Test()
 			f := &cmdutil.Factory{
-				IOStreams: io,
+				IOStreams: ios,
 			}
 
-			io.SetStdoutTTY(true)
-			io.SetStdinTTY(tt.stdinTTY)
+			ios.SetStdoutTTY(true)
+			ios.SetStdinTTY(tt.stdinTTY)
 			if tt.stdin != "" {
 				stdin.WriteString(tt.stdin)
 			}
@@ -193,7 +216,7 @@ func Test_loginRun_nontty(t *testing.T) {
 		name       string
 		opts       *LoginOptions
 		httpStubs  func(*httpmock.Registry)
-		env        map[string]string
+		cfgStubs   func(*config.ConfigMock)
 		wantHosts  string
 		wantErr    string
 		wantStderr string
@@ -259,8 +282,10 @@ func Test_loginRun_nontty(t *testing.T) {
 				Hostname: "github.com",
 				Token:    "abc456",
 			},
-			env: map[string]string{
-				"GH_TOKEN": "value_from_env",
+			cfgStubs: func(c *config.ConfigMock) {
+				c.AuthTokenFunc = func(string) (string, string) {
+					return "value_from_env", "GH_TOKEN"
+				}
 			},
 			wantErr: "SilentError",
 			wantStderr: heredoc.Doc(`
@@ -274,8 +299,10 @@ func Test_loginRun_nontty(t *testing.T) {
 				Hostname: "ghe.io",
 				Token:    "abc456",
 			},
-			env: map[string]string{
-				"GH_ENTERPRISE_TOKEN": "value_from_env",
+			cfgStubs: func(c *config.ConfigMock) {
+				c.AuthTokenFunc = func(string) (string, string) {
+					return "value_from_env", "GH_ENTERPRISE_TOKEN"
+				}
 			},
 			wantErr: "SilentError",
 			wantStderr: heredoc.Doc(`
@@ -286,38 +313,25 @@ func Test_loginRun_nontty(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		io, _, stdout, stderr := iostreams.Test()
+		ios, _, stdout, stderr := iostreams.Test()
+		ios.SetStdinTTY(false)
+		ios.SetStdoutTTY(false)
+		tt.opts.IO = ios
 
-		io.SetStdinTTY(false)
-		io.SetStdoutTTY(false)
-
-		tt.opts.Config = func() (config.Config, error) {
-			cfg := config.NewBlankConfig()
-			return config.InheritEnv(cfg), nil
-		}
-
-		tt.opts.IO = io
 		t.Run(tt.name, func(t *testing.T) {
+			readConfigs := config.StubWriteConfig(t)
+			cfg := config.NewBlankConfig()
+			if tt.cfgStubs != nil {
+				tt.cfgStubs(cfg)
+			}
+			tt.opts.Config = func() (config.Config, error) {
+				return cfg, nil
+			}
+
 			reg := &httpmock.Registry{}
 			tt.opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
-
-			old_GH_TOKEN := os.Getenv("GH_TOKEN")
-			os.Setenv("GH_TOKEN", tt.env["GH_TOKEN"])
-			old_GITHUB_TOKEN := os.Getenv("GITHUB_TOKEN")
-			os.Setenv("GITHUB_TOKEN", tt.env["GITHUB_TOKEN"])
-			old_GH_ENTERPRISE_TOKEN := os.Getenv("GH_ENTERPRISE_TOKEN")
-			os.Setenv("GH_ENTERPRISE_TOKEN", tt.env["GH_ENTERPRISE_TOKEN"])
-			old_GITHUB_ENTERPRISE_TOKEN := os.Getenv("GITHUB_ENTERPRISE_TOKEN")
-			os.Setenv("GITHUB_ENTERPRISE_TOKEN", tt.env["GITHUB_ENTERPRISE_TOKEN"])
-			defer func() {
-				os.Setenv("GH_TOKEN", old_GH_TOKEN)
-				os.Setenv("GITHUB_TOKEN", old_GITHUB_TOKEN)
-				os.Setenv("GH_ENTERPRISE_TOKEN", old_GH_ENTERPRISE_TOKEN)
-				os.Setenv("GITHUB_ENTERPRISE_TOKEN", old_GITHUB_ENTERPRISE_TOKEN)
-			}()
-
 			if tt.httpStubs != nil {
 				tt.httpStubs(reg)
 			}
@@ -325,16 +339,16 @@ func Test_loginRun_nontty(t *testing.T) {
 			_, restoreRun := run.Stub()
 			defer restoreRun(t)
 
-			mainBuf := bytes.Buffer{}
-			hostsBuf := bytes.Buffer{}
-			defer config.StubWriteConfig(&mainBuf, &hostsBuf)()
-
 			err := loginRun(tt.opts)
 			if tt.wantErr != "" {
 				assert.EqualError(t, err, tt.wantErr)
 			} else {
 				assert.NoError(t, err)
 			}
+
+			mainBuf := bytes.Buffer{}
+			hostsBuf := bytes.Buffer{}
+			readConfigs(&mainBuf, &hostsBuf)
 
 			assert.Equal(t, "", stdout.String())
 			assert.Equal(t, tt.wantStderr, stderr.String())
@@ -345,6 +359,8 @@ func Test_loginRun_nontty(t *testing.T) {
 }
 
 func Test_loginRun_Survey(t *testing.T) {
+	stubHomeDir(t, t.TempDir())
+
 	tests := []struct {
 		name       string
 		opts       *LoginOptions
@@ -353,27 +369,26 @@ func Test_loginRun_Survey(t *testing.T) {
 		runStubs   func(*run.CommandStubber)
 		wantHosts  string
 		wantErrOut *regexp.Regexp
-		cfg        func(config.Config)
+		cfgStubs   func(*config.ConfigMock)
 	}{
 		{
 			name: "already authenticated",
 			opts: &LoginOptions{
 				Interactive: true,
 			},
-			cfg: func(cfg config.Config) {
-				_ = cfg.Set("github.com", "oauth_token", "ghi789")
+			cfgStubs: func(c *config.ConfigMock) {
+				c.AuthTokenFunc = func(h string) (string, string) {
+					return "ghi789", "oauth_token"
+				}
 			},
 			httpStubs: func(reg *httpmock.Registry) {
 				reg.Register(httpmock.REST("GET", ""), httpmock.ScopesResponder("repo,read:org"))
-				// reg.Register(
-				// 	httpmock.GraphQL(`query UserCurrent\b`),
-				// 	httpmock.StringResponse(`{"data":{"viewer":{"login":"jillv"}}}`))
 			},
 			askStubs: func(as *prompt.AskStubber) {
-				as.StubOne(0)     // host type github.com
-				as.StubOne(false) // do not continue
+				as.StubPrompt("What account do you want to log into?").AnswerWith("GitHub.com")
+				as.StubPrompt("You're already logged into github.com. Do you want to re-authenticate?").AnswerWith(false)
 			},
-			wantHosts:  "", // nothing should have been written to hosts
+			wantHosts:  "",
 			wantErrOut: nil,
 		},
 		{
@@ -389,10 +404,10 @@ func Test_loginRun_Survey(t *testing.T) {
 				    git_protocol: https
 			`),
 			askStubs: func(as *prompt.AskStubber) {
-				as.StubOne("HTTPS")  // git_protocol
-				as.StubOne(false)    // cache credentials
-				as.StubOne(1)        // auth mode: token
-				as.StubOne("def456") // auth token
+				as.StubPrompt("What is your preferred protocol for Git operations?").AnswerWith("HTTPS")
+				as.StubPrompt("Authenticate Git with your GitHub credentials?").AnswerWith(false)
+				as.StubPrompt("How would you like to authenticate GitHub CLI?").AnswerWith("Paste an authentication token")
+				as.StubPrompt("Paste your authentication token:").AnswerWith("def456")
 			},
 			runStubs: func(rs *run.CommandStubber) {
 				rs.Register(`git config credential\.https:/`, 1, "")
@@ -418,12 +433,12 @@ func Test_loginRun_Survey(t *testing.T) {
 				Interactive: true,
 			},
 			askStubs: func(as *prompt.AskStubber) {
-				as.StubOne(1)              // host type enterprise
-				as.StubOne("brad.vickers") // hostname
-				as.StubOne("HTTPS")        // git_protocol
-				as.StubOne(false)          // cache credentials
-				as.StubOne(1)              // auth mode: token
-				as.StubOne("def456")       // auth token
+				as.StubPrompt("What account do you want to log into?").AnswerWith("GitHub Enterprise Server")
+				as.StubPrompt("GHE hostname:").AnswerWith("brad.vickers")
+				as.StubPrompt("What is your preferred protocol for Git operations?").AnswerWith("HTTPS")
+				as.StubPrompt("Authenticate Git with your GitHub credentials?").AnswerWith(false)
+				as.StubPrompt("How would you like to authenticate GitHub CLI?").AnswerWith("Paste an authentication token")
+				as.StubPrompt("Paste your authentication token:").AnswerWith("def456")
 			},
 			runStubs: func(rs *run.CommandStubber) {
 				rs.Register(`git config credential\.https:/`, 1, "")
@@ -449,11 +464,11 @@ func Test_loginRun_Survey(t *testing.T) {
 				Interactive: true,
 			},
 			askStubs: func(as *prompt.AskStubber) {
-				as.StubOne(0)        // host type github.com
-				as.StubOne("HTTPS")  // git_protocol
-				as.StubOne(false)    // cache credentials
-				as.StubOne(1)        // auth mode: token
-				as.StubOne("def456") // auth token
+				as.StubPrompt("What account do you want to log into?").AnswerWith("GitHub.com")
+				as.StubPrompt("What is your preferred protocol for Git operations?").AnswerWith("HTTPS")
+				as.StubPrompt("Authenticate Git with your GitHub credentials?").AnswerWith(false)
+				as.StubPrompt("How would you like to authenticate GitHub CLI?").AnswerWith("Paste an authentication token")
+				as.StubPrompt("Paste your authentication token:").AnswerWith("def456")
 			},
 			runStubs: func(rs *run.CommandStubber) {
 				rs.Register(`git config credential\.https:/`, 1, "")
@@ -473,11 +488,11 @@ func Test_loginRun_Survey(t *testing.T) {
 				Interactive: true,
 			},
 			askStubs: func(as *prompt.AskStubber) {
-				as.StubOne(0)        // host type github.com
-				as.StubOne("SSH")    // git_protocol
-				as.StubOne(10)       // TODO: SSH key selection
-				as.StubOne(1)        // auth mode: token
-				as.StubOne("def456") // auth token
+				as.StubPrompt("What account do you want to log into?").AnswerWith("GitHub.com")
+				as.StubPrompt("What is your preferred protocol for Git operations?").AnswerWith("SSH")
+				as.StubPrompt("Generate a new SSH key to add to your GitHub account?").AnswerWith(false)
+				as.StubPrompt("How would you like to authenticate GitHub CLI?").AnswerWith("Paste an authentication token")
+				as.StubPrompt("Paste your authentication token:").AnswerWith("def456")
 			},
 			wantErrOut: regexp.MustCompile("Tip: you can generate a Personal Access Token here https://github.com/settings/tokens"),
 		},
@@ -488,18 +503,19 @@ func Test_loginRun_Survey(t *testing.T) {
 		if tt.opts == nil {
 			tt.opts = &LoginOptions{}
 		}
-		io, _, _, stderr := iostreams.Test()
+		ios, _, _, stderr := iostreams.Test()
 
-		io.SetStdinTTY(true)
-		io.SetStderrTTY(true)
-		io.SetStdoutTTY(true)
+		ios.SetStdinTTY(true)
+		ios.SetStderrTTY(true)
+		ios.SetStdoutTTY(true)
 
-		tt.opts.IO = io
+		tt.opts.IO = ios
+
+		readConfigs := config.StubWriteConfig(t)
 
 		cfg := config.NewBlankConfig()
-
-		if tt.cfg != nil {
-			tt.cfg(cfg)
+		if tt.cfgStubs != nil {
+			tt.cfgStubs(cfg)
 		}
 		tt.opts.Config = func() (config.Config, error) {
 			return cfg, nil
@@ -519,12 +535,7 @@ func Test_loginRun_Survey(t *testing.T) {
 					httpmock.StringResponse(`{"data":{"viewer":{"login":"jillv"}}}`))
 			}
 
-			mainBuf := bytes.Buffer{}
-			hostsBuf := bytes.Buffer{}
-			defer config.StubWriteConfig(&mainBuf, &hostsBuf)()
-
-			as, teardown := prompt.InitAskStubber()
-			defer teardown()
+			as := prompt.NewAskStubber(t)
 			if tt.askStubs != nil {
 				tt.askStubs(as)
 			}
@@ -539,6 +550,10 @@ func Test_loginRun_Survey(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %s", err)
 			}
+
+			mainBuf := bytes.Buffer{}
+			hostsBuf := bytes.Buffer{}
+			readConfigs(&mainBuf, &hostsBuf)
 
 			assert.Equal(t, tt.wantHosts, hostsBuf.String())
 			if tt.wantErrOut == nil {

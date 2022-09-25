@@ -6,13 +6,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/text"
-	"github.com/cli/cli/utils"
 	"github.com/spf13/cobra"
+
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/config"
+	fd "github.com/cli/cli/v2/internal/featuredetection"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/text"
+	"github.com/cli/cli/v2/utils"
 )
 
 type ListOptions struct {
@@ -20,6 +22,7 @@ type ListOptions struct {
 	Config     func() (config.Config, error)
 	IO         *iostreams.IOStreams
 	Exporter   cmdutil.Exporter
+	Detector   fd.Detector
 
 	Limit int
 	Owner string
@@ -28,6 +31,7 @@ type ListOptions struct {
 	Fork        bool
 	Source      bool
 	Language    string
+	Topic       string
 	Archived    bool
 	NonArchived bool
 
@@ -48,22 +52,23 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	)
 
 	cmd := &cobra.Command{
-		Use:   "list [<owner>]",
-		Args:  cobra.MaximumNArgs(1),
-		Short: "List repositories owned by user or organization",
+		Use:     "list [<owner>]",
+		Args:    cobra.MaximumNArgs(1),
+		Short:   "List repositories owned by user or organization",
+		Aliases: []string{"ls"},
 		RunE: func(c *cobra.Command, args []string) error {
 			if opts.Limit < 1 {
-				return &cmdutil.FlagError{Err: fmt.Errorf("invalid limit: %v", opts.Limit)}
+				return cmdutil.FlagErrorf("invalid limit: %v", opts.Limit)
 			}
 
-			if flagPrivate && flagPublic {
-				return &cmdutil.FlagError{Err: fmt.Errorf("specify only one of `--public` or `--private`")}
+			if err := cmdutil.MutuallyExclusive("specify only one of `--public`, `--private`, or `--visibility`", flagPublic, flagPrivate, opts.Visibility != ""); err != nil {
+				return err
 			}
 			if opts.Source && opts.Fork {
-				return &cmdutil.FlagError{Err: fmt.Errorf("specify only one of `--source` or `--fork`")}
+				return cmdutil.FlagErrorf("specify only one of `--source` or `--fork`")
 			}
 			if opts.Archived && opts.NonArchived {
-				return &cmdutil.FlagError{Err: fmt.Errorf("specify only one of `--archived` or `--no-archived`")}
+				return cmdutil.FlagErrorf("specify only one of `--archived` or `--no-archived`")
 			}
 
 			if flagPrivate {
@@ -84,14 +89,19 @@ func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Comman
 	}
 
 	cmd.Flags().IntVarP(&opts.Limit, "limit", "L", 30, "Maximum number of repositories to list")
-	cmd.Flags().BoolVar(&flagPrivate, "private", false, "Show only private repositories")
-	cmd.Flags().BoolVar(&flagPublic, "public", false, "Show only public repositories")
 	cmd.Flags().BoolVar(&opts.Source, "source", false, "Show only non-forks")
 	cmd.Flags().BoolVar(&opts.Fork, "fork", false, "Show only forks")
 	cmd.Flags().StringVarP(&opts.Language, "language", "l", "", "Filter by primary coding language")
+	cmd.Flags().StringVar(&opts.Topic, "topic", "", "Filter by topic")
+	cmdutil.StringEnumFlag(cmd, &opts.Visibility, "visibility", "", "", []string{"public", "private", "internal"}, "Filter by repository visibility")
 	cmd.Flags().BoolVar(&opts.Archived, "archived", false, "Show only archived repositories")
 	cmd.Flags().BoolVar(&opts.NonArchived, "no-archived", false, "Omit archived repositories")
 	cmdutil.AddJSONFlags(cmd, &opts.Exporter, api.RepositoryFields)
+
+	cmd.Flags().BoolVar(&flagPrivate, "private", false, "Show only private repositories")
+	cmd.Flags().BoolVar(&flagPublic, "public", false, "Show only public repositories")
+	_ = cmd.Flags().MarkDeprecated("public", "use `--visibility=public` instead")
+	_ = cmd.Flags().MarkDeprecated("private", "use `--visibility=private` instead")
 
 	return cmd
 }
@@ -104,27 +114,39 @@ func listRun(opts *ListOptions) error {
 		return err
 	}
 
-	filter := FilterOptions{
-		Visibility:  opts.Visibility,
-		Fork:        opts.Fork,
-		Source:      opts.Source,
-		Language:    opts.Language,
-		Archived:    opts.Archived,
-		NonArchived: opts.NonArchived,
-		Fields:      defaultFields,
-	}
-	if opts.Exporter != nil {
-		filter.Fields = opts.Exporter.Fields()
-	}
-
 	cfg, err := opts.Config()
 	if err != nil {
 		return err
 	}
 
-	host, err := cfg.DefaultHost()
+	host, _ := cfg.DefaultHost()
+
+	if opts.Detector == nil {
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, host)
+	}
+	features, err := opts.Detector.RepositoryFeatures()
 	if err != nil {
 		return err
+	}
+
+	fields := defaultFields
+	if features.VisibilityField {
+		fields = append(defaultFields, "visibility")
+	}
+
+	filter := FilterOptions{
+		Visibility:  opts.Visibility,
+		Fork:        opts.Fork,
+		Source:      opts.Source,
+		Language:    opts.Language,
+		Topic:       opts.Topic,
+		Archived:    opts.Archived,
+		NonArchived: opts.NonArchived,
+		Fields:      fields,
+	}
+	if opts.Exporter != nil {
+		filter.Fields = opts.Exporter.Fields()
 	}
 
 	listResult, err := listRepos(httpClient, host, opts.Limit, opts.Owner, filter)
@@ -138,7 +160,7 @@ func listRun(opts *ListOptions) error {
 	defer opts.IO.StopPager()
 
 	if opts.Exporter != nil {
-		return opts.Exporter.Write(opts.IO.Out, listResult.Repositories, opts.IO.ColorEnabled())
+		return opts.Exporter.Write(opts.IO, listResult.Repositories)
 	}
 
 	cs := opts.IO.ColorScheme()
@@ -148,6 +170,7 @@ func listRun(opts *ListOptions) error {
 	for _, repo := range listResult.Repositories {
 		info := repoInfo(repo)
 		infoColor := cs.Gray
+
 		if repo.IsPrivate {
 			infoColor = cs.Yellow
 		}
@@ -168,8 +191,11 @@ func listRun(opts *ListOptions) error {
 		tp.EndRow()
 	}
 
+	if listResult.FromSearch && opts.Limit > 1000 {
+		fmt.Fprintln(opts.IO.ErrOut, "warning: this query uses the Search API which is capped at 1000 results maximum")
+	}
 	if opts.IO.IsStdoutTTY() {
-		hasFilters := filter.Visibility != "" || filter.Fork || filter.Source || filter.Language != ""
+		hasFilters := filter.Visibility != "" || filter.Fork || filter.Source || filter.Language != "" || filter.Topic != ""
 		title := listHeader(listResult.Owner, len(listResult.Repositories), listResult.TotalCount, hasFilters)
 		fmt.Fprintf(opts.IO.Out, "\n%s\n\n", title)
 	}
@@ -195,13 +221,8 @@ func listHeader(owner string, matchCount, totalMatchCount int, hasFilters bool) 
 }
 
 func repoInfo(r api.Repository) string {
-	var tags []string
+	tags := []string{visibilityLabel(r)}
 
-	if r.IsPrivate {
-		tags = append(tags, "private")
-	} else {
-		tags = append(tags, "public")
-	}
 	if r.IsFork {
 		tags = append(tags, "fork")
 	}
@@ -210,4 +231,13 @@ func repoInfo(r api.Repository) string {
 	}
 
 	return strings.Join(tags, ", ")
+}
+
+func visibilityLabel(repo api.Repository) string {
+	if repo.Visibility != "" {
+		return strings.ToLower(repo.Visibility)
+	} else if repo.IsPrivate {
+		return "private"
+	}
+	return "public"
 }

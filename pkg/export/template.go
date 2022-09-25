@@ -4,23 +4,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"strconv"
 	"strings"
 	"text/template"
 	"time"
 
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/text"
+	"github.com/cli/cli/v2/utils"
 	"github.com/mgutz/ansi"
 )
 
-func parseTemplate(tpl string, colorEnabled bool) (*template.Template, error) {
+type Template struct {
+	io           *iostreams.IOStreams
+	tablePrinter utils.TablePrinter
+	template     *template.Template
+	templateStr  string
+}
+
+func NewTemplate(io *iostreams.IOStreams, template string) Template {
+	return Template{
+		io:          io,
+		templateStr: template,
+	}
+}
+
+func (t *Template) parseTemplate(tpl string) (*template.Template, error) {
 	now := time.Now()
 
 	templateFuncs := map[string]interface{}{
-		"color":     templateColor,
-		"autocolor": templateColor,
+		"color":     t.color,
+		"autocolor": t.color,
 
 		"timefmt": func(format, input string) (string, error) {
 			t, err := time.Parse(time.RFC3339, input)
@@ -37,11 +52,22 @@ func parseTemplate(tpl string, colorEnabled bool) (*template.Template, error) {
 			return timeAgo(now.Sub(t)), nil
 		},
 
-		"pluck": templatePluck,
-		"join":  templateJoin,
+		"pluck":       templatePluck,
+		"join":        templateJoin,
+		"tablerow":    t.tableRow,
+		"tablerender": t.tableRender,
+		"truncate": func(maxWidth int, v interface{}) (string, error) {
+			if v == nil {
+				return "", nil
+			}
+			if s, ok := v.(string); ok {
+				return text.Truncate(maxWidth, s), nil
+			}
+			return "", fmt.Errorf("invalid value; expected string, got %T", v)
+		},
 	}
 
-	if !colorEnabled {
+	if !t.io.ColorEnabled() {
 		templateFuncs["autocolor"] = func(colorName string, input interface{}) (string, error) {
 			return jsonScalarToString(input)
 		}
@@ -50,13 +76,19 @@ func parseTemplate(tpl string, colorEnabled bool) (*template.Template, error) {
 	return template.New("").Funcs(templateFuncs).Parse(tpl)
 }
 
-func ExecuteTemplate(w io.Writer, input io.Reader, templateStr string, colorEnabled bool) error {
-	t, err := parseTemplate(templateStr, colorEnabled)
-	if err != nil {
-		return err
+func (t *Template) Execute(input io.Reader) error {
+	w := t.io.Out
+
+	if t.template == nil {
+		template, err := t.parseTemplate(t.templateStr)
+		if err != nil {
+			return err
+		}
+
+		t.template = template
 	}
 
-	jsonData, err := ioutil.ReadAll(input)
+	jsonData, err := io.ReadAll(input)
 	if err != nil {
 		return err
 	}
@@ -66,7 +98,15 @@ func ExecuteTemplate(w io.Writer, input io.Reader, templateStr string, colorEnab
 		return err
 	}
 
-	return t.Execute(w, data)
+	return t.template.Execute(w, data)
+}
+
+func ExecuteTemplate(io *iostreams.IOStreams, input io.Reader, template string) error {
+	t := NewTemplate(io, template)
+	if err := t.Execute(input); err != nil {
+		return err
+	}
+	return t.End()
 }
 
 func jsonScalarToString(input interface{}) (string, error) {
@@ -88,7 +128,7 @@ func jsonScalarToString(input interface{}) (string, error) {
 	}
 }
 
-func templateColor(colorName string, input interface{}) (string, error) {
+func (t *Template) color(colorName string, input interface{}) (string, error) {
 	text, err := jsonScalarToString(input)
 	if err != nil {
 		return "", err
@@ -115,6 +155,40 @@ func templateJoin(sep string, input []interface{}) (string, error) {
 		results = append(results, text)
 	}
 	return strings.Join(results, sep), nil
+}
+
+func (t *Template) tableRow(fields ...interface{}) (string, error) {
+	if t.tablePrinter == nil {
+		t.tablePrinter = utils.NewTablePrinterWithOptions(t.io, utils.TablePrinterOptions{IsTTY: true})
+	}
+	for _, e := range fields {
+		s, err := jsonScalarToString(e)
+		if err != nil {
+			return "", fmt.Errorf("failed to write table row: %v", err)
+		}
+		t.tablePrinter.AddField(s, text.TruncateColumn, nil)
+	}
+	t.tablePrinter.EndRow()
+	return "", nil
+}
+
+func (t *Template) tableRender() (string, error) {
+	if t.tablePrinter != nil {
+		err := t.tablePrinter.Render()
+		t.tablePrinter = nil
+		if err != nil {
+			return "", fmt.Errorf("failed to render table: %v", err)
+		}
+	}
+	return "", nil
+}
+
+func (t *Template) End() error {
+	// Finalize any template actions.
+	if _, err := t.tableRender(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func timeAgo(ago time.Duration) string {
